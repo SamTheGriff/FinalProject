@@ -1,37 +1,78 @@
-from scapy.all import rdpcap, TCP, UDP, Raw
-import sqlite3
-
+from scapy.all import rdpcap, TCP, UDP, DNS, Raw
+import re
 # Pattern Identification Functions
 def identify_http_patterns(packets):
+    """Identify HTTP request patterns."""
     http_requests = []
     for pkt in packets:
         if pkt.haslayer(Raw) and pkt.haslayer(TCP) and (pkt[TCP].dport == 80 or pkt[TCP].sport == 80):
             payload = pkt[Raw].load.decode(errors="ignore")
             if "GET" in payload or "POST" in payload:
-                http_requests.append(payload.splitlines()[0])
+                request = payload.splitlines()[0]
+                http_requests.append(request)  # Example: "GET /index.html HTTP/1.1"
     return http_requests
 
+def extract_sni_from_payload(payload):
+    """
+    Extract SNI (Server Name Indication) from a TLS Client Hello message in the raw payload.
+    Cleans and validates the extracted SNI.
+    """
+    try:
+        if payload[:2] == b'\x16\x03':  # TLS handshake content type and version
+            start_index = payload.find(b'\x00\x00')  # Find the start of the SNI extension
+            if start_index > 0:
+                sni_length = payload[start_index + 2] * 256 + payload[start_index + 3]
+                sni_raw = payload[start_index + 4 : start_index + 4 + sni_length]
+                sni = sni_raw.decode("utf-8", errors="ignore")
+                
+                # Validate the SNI (must match a domain name format)
+                if re.match(r'^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', sni):
+                    return sni
+    except Exception:
+        pass
+    return None
+
 def identify_https_patterns(packets):
+    """
+    Identify HTTPS patterns by extracting SNI (Server Name Indication) from TLS handshakes.
+    """
     tls_handshakes = 0
+    observed_domains = []
+
     for pkt in packets:
         if pkt.haslayer(TCP) and (pkt[TCP].dport == 443 or pkt[TCP].sport == 443):
             if pkt.haslayer(Raw):
                 payload = pkt[Raw].load
-                if b'\x16\x03' in payload:
+                sni = extract_sni_from_payload(payload)
+                if sni:
                     tls_handshakes += 1
-    return tls_handshakes
+                    observed_domains.append(sni)
+    return {"handshake_count": tls_handshakes, "observed_domains": observed_domains}
+
+def identify_quic_patterns(packets):
+    """Identify QUIC traffic based on UDP port 443."""
+    quic_patterns = {"packet_count": 0, "total_bytes": 0}
+    for pkt in packets:
+        if pkt.haslayer(UDP) and (pkt[UDP].dport == 443 or pkt[UDP].sport == 443):
+            quic_patterns["packet_count"] += 1
+            quic_patterns["total_bytes"] += len(pkt)
+    return quic_patterns
 
 def identify_dns_patterns(packets):
+    """
+    Identify DNS query patterns.
+    Extracts queried domain names from DNS packets.
+    """
     dns_queries = []
     for pkt in packets:
-        if pkt.haslayer(UDP) and (pkt[UDP].dport == 53 or pkt[UDP].sport == 53):
-            if pkt.haslayer(Raw):
-                payload = pkt[Raw].load.decode(errors="ignore")
-                if "www" in payload or ".com" in payload:
-                    dns_queries.append(payload)
+        # Check for DNS layer (supports both UDP and TCP)
+        if pkt.haslayer(DNS) and pkt[DNS].qd:
+            queried_name = pkt[DNS].qd.qname.decode(errors="ignore")
+            dns_queries.append(queried_name)
     return dns_queries
 
 def identify_ftp_patterns(packets):
+    """Identify FTP command patterns."""
     ftp_commands = []
     for pkt in packets:
         if pkt.haslayer(Raw) and pkt.haslayer(TCP) and (pkt[TCP].dport == 21 or pkt[TCP].sport == 21):
@@ -41,6 +82,7 @@ def identify_ftp_patterns(packets):
     return ftp_commands
 
 def identify_smtp_patterns(packets):
+    """Identify SMTP command patterns."""
     smtp_commands = []
     for pkt in packets:
         if pkt.haslayer(Raw) and pkt.haslayer(TCP) and (pkt[TCP].dport == 25 or pkt[TCP].sport == 25):
@@ -50,96 +92,59 @@ def identify_smtp_patterns(packets):
     return smtp_commands
 
 def identify_ssh_patterns(packets):
-    ssh_attempts = 0
+    """Identify SSH banner patterns."""
+    ssh_banners = []
     for pkt in packets:
-        if pkt.haslayer(TCP) and (pkt[TCP].dport == 22 or pkt[TCP].sport == 22):
-            if pkt.haslayer(Raw):
-                payload = pkt[Raw].load.decode(errors="ignore")
-                if "SSH-" in payload:
-                    ssh_attempts += 1
-    return ssh_attempts
+        if pkt.haslayer(Raw) and pkt.haslayer(TCP) and (pkt[TCP].dport == 22 or pkt[TCP].sport == 22):
+            payload = pkt[Raw].load.decode(errors="ignore")
+            if "SSH-" in payload:  # Banner for SSH connections
+                ssh_banners.append(payload.strip())
+    return ssh_banners
 
 def identify_pattern_by_protocol(file):
+    """
+    Identify patterns across multiple protocols in the given pcap file.
+    Returns a dictionary of identified patterns.
+    """
     packets = rdpcap(file)
-    return {
+    patterns = {
         "HTTP": identify_http_patterns(packets),
         "HTTPS": identify_https_patterns(packets),
         "DNS": identify_dns_patterns(packets),
         "FTP": identify_ftp_patterns(packets),
         "SMTP": identify_smtp_patterns(packets),
         "SSH": identify_ssh_patterns(packets),
+        "QUIC": identify_quic_patterns(packets),
     }
-
-# Database Setup and Purpose Analysis
-def setup_pattern_database(db_file="patterns.db"):
-    conn = sqlite3.connect(db_file)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS traffic_patterns (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            protocol TEXT,
-            pattern TEXT,
-            purpose TEXT
-        )
-    ''')
-    known_patterns = [
-        ("HTTP", "GET /index.html", "Normal Web Browsing"),
-        ("HTTPS", "TLS Handshake", "Secure Web Browsing"),
-        ("DNS", "www.example.com", "Domain Resolution"),
-        ("FTP", "USER admin", "File Transfer Login Attempt"),
-        ("SMTP", "MAIL FROM:<user@example.com>", "Email Sending"),
-        ("SSH", "SSH-", "Remote Server Access"),
-        ("HTTP", "POST /login", "User Authentication")
-    ]
-    cursor.executemany('''
-        INSERT OR IGNORE INTO traffic_patterns (protocol, pattern, purpose)
-        VALUES (?, ?, ?)
-    ''', known_patterns)
-    conn.commit()
-    conn.close()
-
-def analyze_purpose(patterns, db_file="patterns.db"):
-    conn = sqlite3.connect(db_file)
-    cursor = conn.cursor()
-    results = {}
-    for protocol, detected_patterns in patterns.items():
-        if isinstance(detected_patterns, int):
-            if protocol == "HTTPS" and detected_patterns > 0:
-                results[protocol] = "Secure Web Browsing (TLS Handshakes detected)"
-            continue
-        results[protocol] = []
-        for pattern in detected_patterns:
-            cursor.execute("SELECT purpose FROM traffic_patterns WHERE protocol = ? AND pattern LIKE ?", 
-                           (protocol, f"%{pattern}%"))
-            match = cursor.fetchone()
-            if match:
-                results[protocol].append(match[0])
-            else:
-                results[protocol].append("Unknown Purpose")
-    conn.close()
-    return results
+    return patterns
 
 # Main Execution Block
-if __name__ == "__main__":
-    pcap_file = "top6_capture.pcap"  # Replace with your pcap file path
 
-    # Step 1: Setup database
-    setup_pattern_database()
+pcap_file = "top6_capture.pcap"  # Replace with your pcap file path
 
-    # Step 2: Identify patterns
-    print("\n--- Identifying Traffic Patterns ---")
-    patterns = identify_pattern_by_protocol(pcap_file)
+# Step 1: Identify patterns
+print("\n--- Pattern Identification ---")
+patterns = identify_pattern_by_protocol(pcap_file)
 
-    # Step 3: Analyze purpose
-    print("\n--- Analyzing Traffic Purpose ---")
-    results = analyze_purpose(patterns)
-
-    # Step 4: Display results
-    print("\n--- Purpose Identification Results ---")
-    for protocol, purposes in results.items():
-        print(f"{protocol}:")
-        if isinstance(purposes, list):
-            for purpose in purposes:
-                print(f"  - {purpose}")
+# Step 2: Display patterns
+print("\n--- Identified Patterns ---")
+for protocol, detected_patterns in patterns.items():
+    print(f"\n{protocol}:")
+    if protocol == "HTTPS" and isinstance(detected_patterns, dict):
+        print(f"  - Handshake Count: {detected_patterns['handshake_count']}")
+        if detected_patterns['observed_domains']:
+            print(f"  - Observed Domains:")
+            for domain in detected_patterns['observed_domains']:
+                print(f"    - {domain}")
         else:
-            print(f"  - {purposes}")
+            print(f"  - No domains (SNI) observed")
+    elif protocol == "QUIC" and isinstance(detected_patterns, dict):
+        print(f"  - Packet Count: {detected_patterns['packet_count']}")
+        print(f"  - Total Bytes: {detected_patterns['total_bytes']}")
+    elif isinstance(detected_patterns, list) and detected_patterns:
+        for pattern in detected_patterns:
+            print(f"  - {pattern}")
+    elif isinstance(detected_patterns, int) and detected_patterns > 0:
+        print(f"  - Detected Count: {detected_patterns}")
+    else:
+        print("  - No patterns detected")
