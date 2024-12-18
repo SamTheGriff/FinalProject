@@ -104,7 +104,7 @@ def analyze_purpose(patterns, db_file="patterns.db"):
 
 # Main execution
 if __name__ == "__main__":
-    pcap_file = "top6_capture.pcap"  # Replace with your pcap file path
+    pcap_file = "top6_capture.pcap" 
 
     # Step 1: Set up the pattern database
     setup_pattern_database()

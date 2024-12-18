@@ -97,7 +97,7 @@ def identify_ssh_patterns(packets):
     for pkt in packets:
         if pkt.haslayer(Raw) and pkt.haslayer(TCP) and (pkt[TCP].dport == 22 or pkt[TCP].sport == 22):
             payload = pkt[Raw].load.decode(errors="ignore")
-            if "SSH-" in payload:  # Banner for SSH connections
+            if "SSH-" in payload: 
                 ssh_banners.append(payload.strip())
     return ssh_banners
 
@@ -120,7 +120,7 @@ def identify_pattern_by_protocol(file):
 
 # Main Execution Block
 
-pcap_file = "top6_capture.pcap"  # Replace with your pcap file path
+pcap_file = "top6_capture.pcap" 
 
 # Step 1: Identify patterns
 print("\n--- Pattern Identification ---")

@@ -2,9 +2,8 @@ from scapy.all import sniff, PcapWriter, TCP, UDP, Raw
 
 def capture_top_6_traffic(duration=30, output_file="top6_capture.pcap"):
     """
-    Capture network traffic for HTTP, HTTPS, DNS, FTP, SMTP, SSH, and detect YouTube streaming.
-    Detects MPEG-DASH manifests (.mpd) and video segments (.mp4, .webm).
-    Monitors QUIC-based traffic over UDP 443.
+    Capture network traffic for HTTP, HTTPS, DNS, FTP, SMTP, SSH.
+    Monitors QUIC-based traffic (Youtube) over UDP 443.
     """
     # Define a BPF filter for the top 6 protocols and QUIC
     bpf_filter = (
